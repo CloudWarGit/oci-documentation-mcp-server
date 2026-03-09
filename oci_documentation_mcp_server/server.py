@@ -15,46 +15,43 @@ import httpx
 import os
 import re
 import sys
-from googlesearch import search
+import requests
 
-# Import models
 from oci_documentation_mcp_server.models import (
     SearchResult,
 )
 
-# Import utility functions
 from oci_documentation_mcp_server.util import (
     extract_content_from_html,
     format_documentation_result,
     is_html_content
 )
+from fastmcp import FastMCP, Context
 from loguru import logger
-from mcp.server.fastmcp import Context, FastMCP
 from pydantic import AnyUrl, Field
 from typing import List, Union
 
 
-# Set up logging
 logger.remove()
 logger.add(sys.stderr, level=os.getenv('FASTMCP_LOG_LEVEL', 'WARNING'))
 
 DEFAULT_HEADERS = {
-    "user-agent":'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36',
-    "sec-ch-ua-mobile":'?0',
-    "sec-ch-ua":'"Google Chrome";v="135", "Not-A.Brand";v="8", "Chromium";v="135"',
-    "accept-language":'*/en-US,en;q=0.9',
+    "user-agent": 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36',
+    "sec-ch-ua-mobile": '?0',
+    "sec-ch-ua": '"Google Chrome";v="135", "Not-A.Brand";v="8", "Chromium";v="135"',
+    "accept-language": '*/en-US,en;q=0.9',
     'Content-Type': 'application/json',
-    }
-# SEARCH_API_URL = 'https://docs.oracle.com/apps/ohcsearchclient/api/v2/search/pages'
-# SEARCH_PARAMS = {
-#     "q": None,
-#     "size": None,        
-#     "pg": 1,
-#     "product": "en/cloud/oracle-cloud-infrastructure",
-#     "showfirstpage": "true",
-#     "lang": "en",
-#     "snippet": "true"
-#     }
+}
+
+ORACLE_SEARCH_API_URL = 'https://docs.oracle.com/apps/ohcsearchclient/api/v2/search/pages'
+ORACLE_SEARCH_PARAMS = {
+    "size": 10,
+    "pg": 1,
+    "product": "en/cloud/oracle-cloud-infrastructure",
+    "showfirstpage": "true",
+    "lang": "en",
+    "snippet": "true"
+}
 
 
 mcp = FastMCP(
@@ -81,17 +78,11 @@ mcp = FastMCP(
     - Use `recommend` when: You want to find related content to a documentation page you're already viewing or need to find newly released information
     - Use `recommend` as a fallback when: Multiple searches have not yielded the specific information needed
     """,
-    dependencies=[
-        'pydantic',
-        'httpx',
-        'beautifulsoup4',
-        'googlesearch-python'
-    ],
 )
 
 
 
-@mcp.tool()
+@mcp.tool
 async def search_documentation(
     ctx: Context,
     search_phrase: str = Field(description='Search phrase to use'),
@@ -102,7 +93,7 @@ async def search_documentation(
         le=10,
         ),
     ) -> List[SearchResult]:
-    """Search OCI documentation using the OCI Documentation Search API.
+    """Search OCI documentation using the Oracle Documentation Search API.
 
     ## Usage
 
@@ -119,10 +110,9 @@ async def search_documentation(
     ## Result Interpretation
 
     Each result includes:
-    - score: The relevance score (higher is more relevant)
+    - title: The documentation page title
     - url: The documentation page URL
     - description: A brief excerpt or summary
-    - body: Related text snippets
 
     Args:
         ctx: MCP context for logging and error handling
@@ -132,41 +122,77 @@ async def search_documentation(
     Returns:
         List of search results with URLs, titles, and context snippets
     """
-    logger.error(f'Searching OCI documentation for: {search_phrase}')
+    logger.info(f'Searching OCI documentation for: {search_phrase}')
+
+    params = ORACLE_SEARCH_PARAMS.copy()
+    params['q'] = search_phrase
+    params['size'] = limit
 
     try:
-        response = search(
-            f"{search_phrase} site:docs.oracle.com", 
-             advanced=True, 
-             num_results=limit
-             )
-        
-    except Exception as e:
+        response = requests.get(
+            ORACLE_SEARCH_API_URL,
+            params=params,
+            headers={'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json'},
+            timeout=30,
+        )
+    except requests.RequestException as e:
         error_msg = f'Error searching OCI docs: {str(e)}'
         logger.error(error_msg)
         await ctx.error(error_msg)
-        return [SearchResult(title='', url='', description=error_msg)]    
+        return [SearchResult(title='', url='', description=error_msg)]
+
+    if response.status_code >= 400:
+        error_msg = f'Error searching OCI docs: status code {response.status_code}'
+        logger.error(error_msg)
+        await ctx.error(error_msg)
+        return [SearchResult(title='', url='', description=error_msg)]
+
+    try:
+        data = response.json()
+    except Exception as e:
+        error_msg = f'Error parsing search response: {str(e)}'
+        logger.error(error_msg)
+        await ctx.error(error_msg)
+        return [SearchResult(title='', url='', description=error_msg)]
 
     results = []
-    if response:
-        for i in response:
-            results.append(
-                SearchResult(
-                    title=i.title,
-                    url=i.url,
-                    description=i.description
-                )
+    hits = data.get('hits', [])
+    
+    for hit in hits[:limit]:
+        source = hit.get('_source', {})
+        title = source.get('title', 'Untitled')
+        url = hit.get('_id', '')
+        
+        highlight = hit.get('highlight', {})
+        description = None
+        
+        if 'description' in highlight and highlight['description']:
+            desc_val = highlight['description']
+            description = desc_val[0] if isinstance(desc_val, list) else desc_val
+        elif 'body' in highlight and highlight['body']:
+            body_val = highlight['body']
+            description = body_val[0] if isinstance(body_val, list) else body_val
+        
+        if description:
+            description = re.sub(r'<[^>]+>', '', description)
+            description = description.replace('&nbsp;', ' ').replace('&amp;', '&')
+        
+        results.append(
+            SearchResult(
+                title=title,
+                url=url,
+                description=description[:500] if description else None
             )
+        )
 
     logger.debug(f'Found {len(results)} search results for: {search_phrase}')
     return results
 
 
-@mcp.tool()
+@mcp.tool
 async def read_documentation(
     ctx: Context,
     url: str = Field(description='URL of the OCI documentation page to read'),
-    #url: Union[AnyUrl, str] = Field(description='URL of the OCI documentation page to read'),
     max_length: int = Field(
         default=5000,
         description='Maximum number of characters to return.',
@@ -277,22 +303,30 @@ def main():
     parser = argparse.ArgumentParser(
         description='An OCI Labs Model Context Protocol (MCP) server for OCI Documentation'
     )
-    parser.add_argument('--sse', action='store_true', help='Use SSE transport')
-    parser.add_argument('--port', type=int, default=8888, help='Port to run the server on')
+    parser.add_argument('--transport', type=str, default='streamable-http',
+                        choices=['stdio', 'sse', 'streamable-http'],
+                        help='Transport protocol to use (default: streamable-http)')
+    parser.add_argument('--host', type=str, default='0.0.0.0',
+                        help='Host to bind the server to (default: 0.0.0.0)')
+    parser.add_argument('--port', type=int, default=8000,
+                        help='Port to run the server on (default: 8000)')
+    parser.add_argument('--path', type=str, default='/mcp',
+                        help='Path for the MCP endpoint (default: /mcp)')
 
     args = parser.parse_args()
 
-    # Log startup information
     logger.info('Starting OCI Documentation MCP Server')
+    logger.info(f'Transport: {args.transport}')
 
-    # Run server with appropriate transport
-    if args.sse:
-        logger.info(f'Using SSE transport on port {args.port}')
-        mcp.settings.port = args.port
-        mcp.run(transport='sse')
-    else:
-        logger.info('Using standard stdio transport')
+    if args.transport == 'stdio':
+        logger.info('Using stdio transport')
         mcp.run()
+    elif args.transport == 'sse':
+        logger.info(f'Using SSE transport on {args.host}:{args.port}')
+        mcp.run(transport='sse', host=args.host, port=args.port)
+    else:
+        logger.info(f'Using Streamable HTTP transport on {args.host}:{args.port}{args.path}')
+        mcp.run(transport='streamable-http', host=args.host, port=args.port, path=args.path)
 
 
 if __name__ == '__main__':
