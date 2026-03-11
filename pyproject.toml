@@ -1,5 +1,5 @@
 [project]
-name = "oracle-oci-documentation-retrive-mcp-server"
+name = "oracle-oci-documentation-mcp-server"
 version = "0.0.1"
 description = "An  Model Context Protocol (MCP) server for OCI Documentation"
 readme = "README.md"
