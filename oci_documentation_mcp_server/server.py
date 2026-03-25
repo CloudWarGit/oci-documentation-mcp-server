@@ -31,6 +31,10 @@ from loguru import logger
 from pydantic import AnyUrl, Field
 from typing import List, Union
 
+from starlette.middleware.cors import CORSMiddleware
+from starlette.applications import Starlette
+import uvicorn
+
 
 logger.remove()
 logger.add(sys.stderr, level=os.getenv('FASTMCP_LOG_LEVEL', 'WARNING'))
@@ -326,7 +330,16 @@ def main():
         mcp.run(transport='sse', host=args.host, port=args.port)
     else:
         logger.info(f'Using Streamable HTTP transport on {args.host}:{args.port}{args.path}')
-        mcp.run(transport='streamable-http', host=args.host, port=args.port, path=args.path)
+        # Get the FastMCP streamable HTTP app and wrap with CORS middleware
+        mcp_app = mcp.streamable_http_app()
+        app = CORSMiddleware(
+            mcp_app,
+            allow_origins=['*'],
+            allow_credentials=True,
+            allow_methods=['*'],
+            allow_headers=['*'],
+        )
+        uvicorn.run(app, host=args.host, port=args.port)
 
 
 if __name__ == '__main__':
